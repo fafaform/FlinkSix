@@ -1,18 +1,17 @@
 package example;
 
 
-import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.FlatMapFunction;
-import org.apache.flink.api.java.functions.KeySelector;
-import org.apache.flink.api.java.tuple.Tuple;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.api.java.tuple.Tuple4;
+import org.apache.flink.runtime.util.event.EventListener;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.flink.shaded.jackson2.org.yaml.snakeyaml.events.Event;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.datastream.DataStreamSink;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
+import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer;
 import org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer;
 import org.apache.flink.streaming.util.serialization.JSONKeyValueDeserializationSchema;
@@ -20,10 +19,9 @@ import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.Duration;
+import javax.annotation.Nullable;
+import java.util.EventObject;
 import java.util.Properties;
-
-import static java.time.temporal.ChronoUnit.MINUTES;
 
 
 public class ReadFromKafka {
@@ -54,9 +52,28 @@ public class ReadFromKafka {
         ////////////////////////////////////////////////////////////////
         //// RECEIVE JSON
         FlinkKafkaConsumer<ObjectNode> JsonSource = new FlinkKafkaConsumer(KAFKA_CONSUMER_TOPIC, new JSONKeyValueDeserializationSchema(false), properties);
+//        JsonSource.assignTimestampsAndWatermarks(
+//                WatermarkStrategy
+//                        .<ObjectNode>forBoundedOutOfOrderness(Duration.of(1, MINUTES))
+//        );
         JsonSource.assignTimestampsAndWatermarks(
-                WatermarkStrategy
-                        .<ObjectNode>forBoundedOutOfOrderness(Duration.of(1, MINUTES))
+                new AssignerWithPeriodicWatermarks<ObjectNode>() {
+                    private final long maxOutOfOrderness = 60000; // 60 seconds
+                    private long currentMaxTimestamp;
+
+                    @Nullable
+                    @Override
+                    public Watermark getCurrentWatermark() {
+                        return new Watermark(currentMaxTimestamp - maxOutOfOrderness);
+                    }
+
+                    @Override
+                    public long extractTimestamp(ObjectNode jsonNodes, long l) {
+                        long timestamp = l;
+                        currentMaxTimestamp = Math.max(timestamp, currentMaxTimestamp);
+                        return timestamp;
+                    }
+                }
         );
         DataStream<Tuple2<String,String>> messageStream = env.addSource(JsonSource).flatMap(new FlatMapFunction<ObjectNode, Tuple2<String,String>>() {
             @Override
